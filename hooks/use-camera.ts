@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { CameraDevice } from '@/types';
 
 export function useCamera() {
@@ -11,19 +11,22 @@ export function useCamera() {
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(0);
   
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const fpsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const frameCountRef = useRef(0);
 
   // Enumerate camera devices
   const enumerateDevices = useCallback(async () => {
     try {
+      // Request permission first to get device labels
+      await navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => stream.getTracks().forEach(track => track.stop()));
+
       const allDevices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = allDevices
         .filter((device) => device.kind === 'videoinput')
-        .map((device) => ({
+        .map((device, index) => ({
           deviceId: device.deviceId,
-          label: device.label || `Camera ${device.deviceId.substring(0, 5)}`,
+          label: device.label || `Camera ${index + 1}`,
           kind: device.kind,
         }));
       
@@ -32,9 +35,9 @@ export function useCamera() {
       if (videoDevices.length > 0 && !selectedDeviceId) {
         setSelectedDeviceId(videoDevices[0].deviceId);
       }
-    } catch (err) {
-      setError('Failed to enumerate camera devices');
-      console.error(err);
+    } catch (err: any) {
+      console.error('Error enumerating devices:', err);
+      setError('Failed to access cameras. Please grant camera permissions.');
     }
   }, [selectedDeviceId]);
 
@@ -48,13 +51,16 @@ export function useCamera() {
         stream.getTracks().forEach((track) => track.stop());
       }
 
+      const targetDeviceId = deviceId || selectedDeviceId;
+
       const constraints: MediaStreamConstraints = {
-        video: deviceId
-          ? { deviceId: { exact: deviceId } }
-          : {
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
+        video: {
+          deviceId: targetDeviceId ? { exact: targetDeviceId } : undefined,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 }
+        },
+        audio: false
       };
 
       const newStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -63,6 +69,9 @@ export function useCamera() {
 
       // Start FPS counter
       frameCountRef.current = 0;
+      if (fpsIntervalRef.current) {
+        clearInterval(fpsIntervalRef.current);
+      }
       fpsIntervalRef.current = setInterval(() => {
         setFps(frameCountRef.current);
         frameCountRef.current = 0;
@@ -70,18 +79,22 @@ export function useCamera() {
 
       return newStream;
     } catch (err: any) {
-      const errorMessage = err.name === 'NotAllowedError'
-        ? 'Camera permission denied'
-        : err.name === 'NotFoundError'
-        ? 'No camera found'
-        : 'Failed to access camera';
+      let errorMessage = 'Failed to access camera';
+      
+      if (err.name === 'NotAllowedError') {
+        errorMessage = 'Camera permission denied. Please allow camera access.';
+      } else if (err.name === 'NotFoundError') {
+        errorMessage = 'No camera found. Please connect a camera.';
+      } else if (err.name === 'NotReadableError') {
+        errorMessage = 'Camera is already in use by another application.';
+      }
       
       setError(errorMessage);
       setIsStreaming(false);
-      console.error(err);
+      console.error('Camera error:', err);
       return null;
     }
-  }, [stream]);
+  }, [stream, selectedDeviceId]);
 
   // Stop camera stream
   const stopCamera = useCallback(() => {
@@ -104,26 +117,27 @@ export function useCamera() {
   const changeCamera = useCallback(async (deviceId: string) => {
     setSelectedDeviceId(deviceId);
     if (isStreaming) {
+      await stopCamera();
       await startCamera(deviceId);
     }
-  }, [isStreaming, startCamera]);
+  }, [isStreaming, startCamera, stopCamera]);
 
   // Increment frame count for FPS calculation
   const incrementFrameCount = useCallback(() => {
     frameCountRef.current++;
   }, []);
 
-  // Initial device enumeration
-  useEffect(() => {
-    enumerateDevices();
-  }, [enumerateDevices]);
-
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopCamera();
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      if (fpsIntervalRef.current) {
+        clearInterval(fpsIntervalRef.current);
+      }
     };
-  }, [stopCamera]);
+  }, [stream]);
 
   return {
     devices,
@@ -132,7 +146,6 @@ export function useCamera() {
     isStreaming,
     error,
     fps,
-    videoRef,
     startCamera,
     stopCamera,
     changeCamera,
@@ -140,4 +153,3 @@ export function useCamera() {
     incrementFrameCount,
   };
 }
-
